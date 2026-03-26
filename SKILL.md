@@ -160,9 +160,48 @@ python3 scripts/gcalendar.py events --user user@precisionsiteservices.com --quer
 
 Note: Calendar script is `gcalendar.py` (avoids Python stdlib `calendar` module collision).
 
-## Not Yet Built
+### Sheets — Read Spreadsheet Data
 
-- `sheets.py` — Spreadsheet read (Phase 4)
-- `docs.py` — Document read (Phase 4)
-- `chat.py` — Google Chat messages (Phase 5)
-- `people.py` — Contacts/directory (Phase 5)
+```bash
+# Get spreadsheet metadata (list all tabs)
+python3 scripts/sheets.py metadata --user user@precisionsiteservices.com --id <spreadsheetId>
+
+# Read a range
+python3 scripts/sheets.py get --user user@precisionsiteservices.com --id <spreadsheetId> --range "Sheet1!A1:D10"
+
+# Read multiple ranges at once
+python3 scripts/sheets.py batch --user user@precisionsiteservices.com --id <spreadsheetId> --ranges "Sheet1!A1:B5" "Sheet2!A1:C3"
+```
+
+### Docs — Read Document Content
+
+```bash
+# Get document with full text
+python3 scripts/docs.py get --user user@precisionsiteservices.com --id <documentId>
+
+# Get text content only
+python3 scripts/docs.py text --user user@precisionsiteservices.com --id <documentId>
+```
+
+### Chat — Read Google Chat Spaces & Messages
+
+```bash
+# List Chat spaces
+python3 scripts/chat.py spaces --user user@precisionsiteservices.com
+
+# List messages in a space
+python3 scripts/chat.py messages --user user@precisionsiteservices.com --space "spaces/AAAA" --max 25
+```
+
+### People — Contacts & Org Directory
+
+```bash
+# List a user's contacts
+python3 scripts/people.py contacts --user user@precisionsiteservices.com --max 50
+
+# Search contacts
+python3 scripts/people.py search --user user@precisionsiteservices.com --query "John"
+
+# Search org directory
+python3 scripts/people.py directory --user user@precisionsiteservices.com --query "manager"
+```
