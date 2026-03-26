@@ -30,8 +30,10 @@ SCOPES = {
     "calendar": ["https://www.googleapis.com/auth/calendar.readonly"],
     "sheets": ["https://www.googleapis.com/auth/spreadsheets.readonly"],
     "docs": ["https://www.googleapis.com/auth/documents.readonly"],
-    "chat": ["https://www.googleapis.com/auth/chat.messages.readonly"],
-    "people": ["https://www.googleapis.com/auth/contacts.readonly"],
+    "people": [
+        "https://www.googleapis.com/auth/contacts.readonly",
+        "https://www.googleapis.com/auth/directory.readonly",
+    ],
 }
 
 # API service names and versions
@@ -44,7 +46,6 @@ API_INFO = {
     "calendar": ("calendar", "v3"),
     "sheets": ("sheets", "v4"),
     "docs": ("docs", "v1"),
-    "chat": ("chat", "v1"),
     "people": ("people", "v1"),
 }
 
