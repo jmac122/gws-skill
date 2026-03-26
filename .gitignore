@@ -11,3 +11,5 @@ service-account.json
 # Python
 *.pyc
 __pycache__/
+.specstory/.project.json
+.specstory/cli/config.toml
