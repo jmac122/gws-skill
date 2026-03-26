@@ -10,8 +10,8 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
 DEFAULT_KEY_PATH = os.path.expanduser("~/.config/gws/service-account.json")
-DEFAULT_ADMIN_EMAIL = os.environ.get("GWS_ADMIN_EMAIL", "jmckenzie@precisionsiteservices.com")
-DEFAULT_DOMAIN = os.environ.get("GWS_DOMAIN", "precisionsiteservices.com")
+DEFAULT_ADMIN_EMAIL = os.environ.get("GWS_ADMIN_EMAIL", "")
+DEFAULT_DOMAIN = os.environ.get("GWS_DOMAIN", "")
 
 # Scope sets by API
 SCOPES = {

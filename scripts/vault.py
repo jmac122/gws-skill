@@ -106,7 +106,7 @@ def search_and_export(
     terms: str,
     start_time: Optional[str] = None,
     end_time: Optional[str] = None,
-    export_name: str = "jarvis-export",
+    export_name: str = "gws-skill-export",
 ) -> dict:
     """Create an export of matching messages.
 
@@ -254,7 +254,7 @@ def run_investigation(
     try:
         # Create matter
         ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-        matter = create_matter(service, f"jarvis-{ts}")
+        matter = create_matter(service, f"gws-{ts}")
         matter_id = matter["matterId"]
 
         if org_unit_id:
