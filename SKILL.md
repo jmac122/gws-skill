@@ -1,6 +1,23 @@
 ---
 name: gws
 description: Google Workspace admin and investigation tool via service account + domain-wide delegation. Covers Vault (eDiscovery email search), Gmail (read any inbox), Directory (users/groups/OUs), Reports (audit logs, logins, Drive activity), Drive (file search), Calendar (events), Sheets (read data), Docs (read content), and People (contacts/directory). Use when querying any user's email, searching org-wide email content, checking login activity, listing users/groups, reading Drive files, viewing calendars, or pulling spreadsheet/doc data across a Google Workspace domain.
+metadata:
+  openclaw:
+    homepage: https://github.com/jmac122/gws-skill
+    requires:
+      env:
+        - GWS_SERVICE_ACCOUNT_PATH
+        - GWS_ADMIN_EMAIL
+        - GWS_DOMAIN
+      bins:
+        - python3
+      pip:
+        - google-auth
+        - google-auth-httplib2
+        - google-api-python-client
+    credentials:
+      primary: GWS_SERVICE_ACCOUNT_PATH
+      description: "GCP service account JSON key with domain-wide delegation. Grants read-only access to Gmail, Vault, Drive, Calendar, Sheets, Docs, Directory, Reports, and People APIs for any user in the Google Workspace domain."
 ---
 
 # GWS Skill
