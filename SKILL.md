@@ -120,10 +120,48 @@ When Jared asks about login/security:
 
 All scripts output JSON. Parse and summarize in natural language for the user. Never dump raw email content to Signal unprompted — summarize unless explicitly asked for full content.
 
+### Drive — Search & Read Any User's Files
+
+```bash
+# Search files
+python3 scripts/drive.py search --user user@precisionsiteservices.com --query "name contains 'invoice'" --max 10
+
+# Recent files
+python3 scripts/drive.py recent --user user@precisionsiteservices.com --max 10
+
+# File metadata by ID
+python3 scripts/drive.py file --user user@precisionsiteservices.com --id <fileId>
+
+# Files shared externally
+python3 scripts/drive.py shared --user user@precisionsiteservices.com
+
+# Search by type (doc, sheet, slide, pdf, image, folder)
+python3 scripts/drive.py type --user user@precisionsiteservices.com --type sheet
+```
+
+### Calendar — Read Any User's Calendar
+
+```bash
+# Today's events
+python3 scripts/gcalendar.py today --user user@precisionsiteservices.com
+
+# Tomorrow's events
+python3 scripts/gcalendar.py tomorrow --user user@precisionsiteservices.com
+
+# Events in date range
+python3 scripts/gcalendar.py events --user user@precisionsiteservices.com --start "2026-03-01T00:00:00Z" --end "2026-03-31T23:59:59Z"
+
+# List all calendars
+python3 scripts/gcalendar.py calendars --user user@precisionsiteservices.com
+
+# Search events by keyword
+python3 scripts/gcalendar.py events --user user@precisionsiteservices.com --query "meeting"
+```
+
+Note: Calendar script is `gcalendar.py` (avoids Python stdlib `calendar` module collision).
+
 ## Not Yet Built
 
-- `drive.py` — Drive file search/read (Phase 3)
-- `calendar.py` — Calendar events (Phase 4)
 - `sheets.py` — Spreadsheet read (Phase 4)
 - `docs.py` — Document read (Phase 4)
 - `chat.py` — Google Chat messages (Phase 5)
