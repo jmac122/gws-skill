@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Admin SDK Reports API — audit logs, login activity, usage reports."""
+"""Admin SDK Reports API — audit logs, login activity.
+
+Always runs as GWS_ADMIN_EMAIL. ``--user`` here is a FILTER (userKey), not
+impersonation.
+"""
 
 import argparse
 import json
@@ -224,9 +228,7 @@ def _parse_activity(activity: dict) -> dict:
     for event in events:
         params = {}
         for p in event.get("parameters", []):
-            name = p.get("name", "")
-            value = p.get("value") or p.get("intValue") or p.get("boolValue") or p.get("multiValue", "")
-            params[name] = value
+            params[p.get("name", "")] = _param_value(p)
         parsed_events.append({
             "type": event.get("type", ""),
             "name": event.get("name", ""),
@@ -236,10 +238,25 @@ def _parse_activity(activity: dict) -> dict:
     return {
         "time": activity.get("id", {}).get("time", ""),
         "actor_email": actor.get("email", ""),
-        "actor_name": actor.get("profileId", ""),
+        # profileId is the actor's numeric Google ID, not a display name.
+        "actor_profile_id": actor.get("profileId", ""),
+        "actor_caller_type": actor.get("callerType", ""),
         "ip_address": activity.get("ipAddress", ""),
         "events": parsed_events,
     }
+
+
+def _param_value(p: dict):
+    """Return the parameter's value, whichever typed field holds it.
+
+    The old ``a or b or c`` chain dropped falsy values (boolValue False,
+    intValue "0") and ignored messageValue / multiIntValue.
+    """
+    for key in ("value", "intValue", "boolValue", "multiValue", "multiIntValue",
+                "messageValue", "multiMessageValue"):
+        if key in p:
+            return p[key]
+    return None
 
 
 def main():

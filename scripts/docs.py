@@ -23,7 +23,7 @@ def get_document(
         Dict with document metadata.
     """
     service = get_service("docs", impersonate=user)
-    doc = service.documents().get(documentId=document_id).execute()
+    doc = service.documents().get(documentId=document_id, includeTabsContent=True).execute()
 
     return {
         "document_id": doc.get("documentId", ""),
@@ -47,7 +47,7 @@ def get_text(
         Dict with document text.
     """
     service = get_service("docs", impersonate=user)
-    doc = service.documents().get(documentId=document_id).execute()
+    doc = service.documents().get(documentId=document_id, includeTabsContent=True).execute()
 
     return {
         "document_id": doc.get("documentId", ""),
@@ -57,19 +57,45 @@ def get_text(
 
 
 def _extract_text(doc: dict) -> str:
-    """Extract plain text from a Google Docs document structure."""
-    body = doc.get("body", {})
-    content = body.get("content", [])
+    """Extract plain text from a Google Docs document, including all tabs.
 
+    Docs with multiple tabs (2024+) only return the first tab in ``body``
+    unless ``includeTabsContent=True``; then content lives under
+    ``tabs[].documentTab.body`` (and ``childTabs``). Tables are walked too.
+    """
+    tabs = doc.get("tabs")
+    if not tabs:
+        return _content_text(doc.get("body", {}).get("content", []))
+    walked = list(_walk_tabs(tabs))
+    label = len(walked) > 1  # label every tab (incl. leaf child tabs) when there is more than one
+    parts = []
+    for tab in walked:
+        title = tab.get("tabProperties", {}).get("title", "")
+        text = _content_text(tab.get("documentTab", {}).get("body", {}).get("content", []))
+        parts.append(f"=== {title} ===\n{text}" if label else text)
+    return "\n".join(parts)
+
+
+def _walk_tabs(tabs: list):
+    for tab in tabs:
+        yield tab
+        yield from _walk_tabs(tab.get("childTabs", []))
+
+
+def _content_text(content: list) -> str:
     text_parts = []
     for element in content:
         if "paragraph" in element:
-            paragraph = element["paragraph"]
-            for elem in paragraph.get("elements", []):
+            for elem in element["paragraph"].get("elements", []):
                 text_run = elem.get("textRun")
                 if text_run:
                     text_parts.append(text_run.get("content", ""))
-
+        elif "table" in element:
+            for row in element["table"].get("tableRows", []):
+                cells = [_content_text(cell.get("content", [])).strip() for cell in row.get("tableCells", [])]
+                text_parts.append("\t".join(cells) + "\n")
+        elif "tableOfContents" in element:
+            text_parts.append(_content_text(element["tableOfContents"].get("content", [])))
     return "".join(text_parts)
 
 
