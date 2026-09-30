@@ -125,10 +125,7 @@ def today_events(user: str) -> dict:
     Returns:
         Dict with today's events.
     """
-    now = datetime.now(timezone.utc)
-    start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-    end = now.replace(hour=23, minute=59, second=59, microsecond=0).isoformat()
-    return list_events(user, time_min=start, time_max=end)
+    return list_events(user, *_local_day_bounds(0))
 
 
 def tomorrow_events(user: str) -> dict:
@@ -140,11 +137,21 @@ def tomorrow_events(user: str) -> dict:
     Returns:
         Dict with tomorrow's events.
     """
-    now = datetime.now(timezone.utc)
-    tomorrow = now + timedelta(days=1)
-    start = tomorrow.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-    end = tomorrow.replace(hour=23, minute=59, second=59, microsecond=0).isoformat()
-    return list_events(user, time_min=start, time_max=end)
+    return list_events(user, *_local_day_bounds(1))
+
+
+def _local_day_bounds(offset_days: int) -> tuple:
+    """Midnight-to-midnight bounds of a day in the machine's LOCAL timezone.
+
+    Previously "today" was computed in UTC, which for America/Chicago shifted
+    the window by 5-6 hours (evening events showed up as "tomorrow").
+    """
+    day = datetime.now().date() + timedelta(days=offset_days)
+    # astimezone() on a naive datetime applies the local offset for THAT date,
+    # so DST-transition days get the right bounds.
+    start = datetime.combine(day, datetime.min.time()).astimezone()
+    end = datetime.combine(day + timedelta(days=1), datetime.min.time()).astimezone()
+    return start.isoformat(), end.isoformat()
 
 
 def _parse_event(e: dict) -> dict:

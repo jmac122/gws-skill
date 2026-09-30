@@ -1,12 +1,36 @@
 #!/usr/bin/env python3
-"""Admin SDK Directory API — users, groups, OUs, devices."""
+"""Admin SDK Directory API — READ-ONLY users, groups, OUs.
+
+Write actions live in admin.py (dry run by default).
+"""
 
 import argparse
 import json
 import sys
 from typing import Optional
 
-from auth import get_service, DEFAULT_DOMAIN
+from auth import get_service, domain as default_domain
+
+
+def _scope_kwargs(domain: Optional[str]) -> dict:
+    """Use the given/GWS_DOMAIN domain, else the whole account (my_customer).
+
+    Previously an unset GWS_DOMAIN sent domain="" and the API rejected it.
+    """
+    d = domain or default_domain()
+    return {"domain": d} if d else {"customer": "my_customer"}
+
+
+def _paginate(request_fn, key: str, max_results: int, page_cap: int) -> list:
+    """Follow nextPageToken until max_results items are collected."""
+    items, token = [], None
+    while len(items) < max_results:
+        resp = request_fn(min(page_cap, max_results - len(items)), token).execute()
+        items.extend(resp.get(key, []))
+        token = resp.get("nextPageToken")
+        if not token:
+            break
+    return items[:max_results]
 
 
 def list_users(
@@ -27,16 +51,14 @@ def list_users(
         Dict with user list.
     """
     service = get_service("directory")
-    kwargs = {
-        "domain": domain or DEFAULT_DOMAIN,
-        "maxResults": max_results,
-        "orderBy": order_by,
-    }
+    kwargs = {**_scope_kwargs(domain), "orderBy": order_by}
     if query:
         kwargs["query"] = query
 
-    results = service.users().list(**kwargs).execute()
-    users = results.get("users", [])
+    users = _paginate(
+        lambda n, t: service.users().list(maxResults=n, pageToken=t, **kwargs),
+        "users", max_results, 500,
+    )
 
     return {
         "total": len(users),
@@ -102,11 +124,11 @@ def list_groups(
         Dict with group list.
     """
     service = get_service("directory")
-    results = service.groups().list(
-        domain=domain or DEFAULT_DOMAIN,
-        maxResults=max_results,
-    ).execute()
-    groups = results.get("groups", [])
+    kwargs = _scope_kwargs(domain)
+    groups = _paginate(
+        lambda n, t: service.groups().list(maxResults=n, pageToken=t, **kwargs),
+        "groups", max_results, 200,
+    )
 
     return {
         "total": len(groups),
@@ -136,11 +158,10 @@ def list_group_members(
         Dict with member list.
     """
     service = get_service("directory")
-    results = service.members().list(
-        groupKey=group_email,
-        maxResults=max_results,
-    ).execute()
-    members = results.get("members", [])
+    members = _paginate(
+        lambda n, t: service.members().list(groupKey=group_email, maxResults=n, pageToken=t),
+        "members", max_results, 200,
+    )
 
     return {
         "group": group_email,

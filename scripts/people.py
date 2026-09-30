@@ -53,6 +53,9 @@ def search_contacts(
         Dict with matching contacts.
     """
     service = get_service("people", impersonate=user)
+    # People API requires a warm-up request with an empty query to refresh the
+    # search cache; otherwise results can be stale/empty.
+    service.people().searchContacts(query="", pageSize=1, readMask="names").execute()
     results = service.people().searchContacts(
         query=query,
         pageSize=max_results,

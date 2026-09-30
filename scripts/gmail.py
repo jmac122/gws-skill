@@ -189,10 +189,11 @@ def search_and_read(
             "results": [],
         }
 
+    service = get_service("gmail", impersonate=user)
     results = []
     for msg in messages:
-        parsed = get_message(user, msg["id"])
-        results.append(parsed)
+        full = service.users().messages().get(userId="me", id=msg["id"], format="full").execute()
+        results.append(_parse_message(full))
 
     return {
         "user": user,
@@ -226,41 +227,41 @@ def _parse_message(msg: dict) -> dict:
     }
 
 
+def _decode(data: str) -> str:
+    return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4)).decode("utf-8", errors="replace")
+
+
+def _strip_html(html: str) -> str:
+    html = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", "", html)
+    html = re.sub(r"<[^>]+>", "", html)
+    return re.sub(r"\s+", " ", html).strip()
+
+
 def _extract_body(payload: dict) -> str:
-    """Extract plain text body from message payload, handling multipart."""
-    mime_type = payload.get("mimeType", "")
+    """Extract a text body from a message payload, handling nested multipart.
 
-    # Direct body
-    if mime_type == "text/plain":
-        data = payload.get("body", {}).get("data", "")
-        if data:
-            return base64.urlsafe_b64decode(data).decode("utf-8", errors="replace")
+    Prefers text/plain anywhere in the tree, falls back to stripped text/html
+    (including single-part HTML messages, which were previously returned empty).
+    """
+    plain, html = _find_parts(payload)
+    return plain or (_strip_html(html) if html else "")
 
-    # Multipart — look for text/plain first, fall back to text/html
-    parts = payload.get("parts", [])
-    plain_text = ""
-    html_text = ""
 
-    for part in parts:
-        part_mime = part.get("mimeType", "")
-        if part_mime == "text/plain":
-            data = part.get("body", {}).get("data", "")
-            if data:
-                plain_text = base64.urlsafe_b64decode(data).decode("utf-8", errors="replace")
-        elif part_mime == "text/html":
-            data = part.get("body", {}).get("data", "")
-            if data:
-                html_text = base64.urlsafe_b64decode(data).decode("utf-8", errors="replace")
-                # Strip HTML tags for readable output
-                html_text = re.sub(r"<[^>]+>", "", html_text)
-                html_text = re.sub(r"\s+", " ", html_text).strip()
-        elif part_mime.startswith("multipart/"):
-            # Recurse into nested multipart
-            nested = _extract_body(part)
-            if nested:
-                plain_text = plain_text or nested
-
-    return plain_text or html_text or ""
+def _find_parts(part: dict) -> tuple:
+    mime_type = part.get("mimeType", "")
+    data = part.get("body", {}).get("data", "")
+    if part.get("filename"):
+        return "", ""  # attachment, not body
+    if mime_type == "text/plain" and data:
+        return _decode(data), ""
+    if mime_type == "text/html" and data:
+        return "", _decode(data)
+    plain, html = "", ""
+    for sub in part.get("parts", []):
+        p, h = _find_parts(sub)
+        plain = plain or p
+        html = html or h
+    return plain, html
 
 
 def _has_attachments(payload: dict) -> bool:
@@ -278,7 +279,7 @@ def _has_attachments(payload: dict) -> bool:
 def main():
     parser = argparse.ArgumentParser(description="Gmail search and read")
     parser.add_argument("--user", required=True, help="Email address to search")
-    parser.add_argument("--query", required=True, help="Gmail search query")
+    parser.add_argument("--query", default="", help="Gmail search query (not needed for --mode read)")
     parser.add_argument("--max", type=int, default=10, help="Max results (default 10)")
     parser.add_argument("--mode", choices=["summary", "full", "read"], default="summary",
                         help="summary=metadata only, full=with body, read=single message by ID")

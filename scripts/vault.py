@@ -11,6 +11,21 @@ from typing import Optional
 from auth import get_service
 
 
+POLL_TIMEOUT_S = 600
+
+
+def _wait_operation(service, operation: dict, timeout_s: int = POLL_TIMEOUT_S) -> dict:
+    """Poll a long-running count operation, with a timeout (was: infinite loop)."""
+    deadline = time.monotonic() + timeout_s
+    op = operation
+    while not op.get("done"):
+        if time.monotonic() > deadline:
+            raise TimeoutError(f"Vault count did not finish within {timeout_s}s ({operation.get('name')})")
+        time.sleep(2)
+        op = service.operations().get(name=operation["name"]).execute()
+    return op
+
+
 def create_matter(service, name: str = "Jarvis Investigation") -> dict:
     """Create a new Vault matter for investigation."""
     body = {"name": name, "state": "OPEN"}
@@ -64,13 +79,7 @@ def count_results(
 
     request = {"query": query}
     operation = service.matters().count(matterId=matter_id, body=request).execute()
-
-    # Poll until complete
-    while True:
-        op = service.operations().get(name=operation["name"]).execute()
-        if op.get("done"):
-            break
-        time.sleep(2)
+    op = _wait_operation(service, operation)
 
     if "error" in op:
         return {"error": op["error"]}
@@ -81,8 +90,13 @@ def count_results(
     queried = int(mail_count.get("queriedAccountsCount", 0))
     matching = int(mail_count.get("matchingAccountsCount", 0))
 
-    # Account-level breakdown (if present — depends on query type)
-    account_counts = mail_count.get("accountCountErrors", [])
+    # Per-account breakdown. (Previously accountCountErrors was mislabeled as
+    # the per-account counts and the real accountCounts field was ignored.)
+    account_counts = [
+        {"email": c.get("account", {}).get("email", ""), "count": int(c.get("count", 0))}
+        for c in mail_count.get("accountCounts", [])
+    ]
+    account_errors = mail_count.get("accountCountErrors", [])
     non_queryable = mail_count.get("nonQueryableAccounts", [])
 
     result = {
@@ -92,7 +106,9 @@ def count_results(
         "accounts_searched": accounts,
     }
     if account_counts:
-        result["account_errors"] = account_counts
+        result["account_counts"] = account_counts
+    if account_errors:
+        result["account_errors"] = account_errors
     if non_queryable:
         result["non_queryable_accounts"] = non_queryable
 
@@ -107,6 +123,7 @@ def search_and_export(
     start_time: Optional[str] = None,
     end_time: Optional[str] = None,
     export_name: str = "gws-skill-export",
+    export_timeout_s: int = 1800,
 ) -> dict:
     """Create an export of matching messages.
 
@@ -152,7 +169,8 @@ def search_and_export(
 
     export_id = export["id"]
 
-    # Poll until export is complete
+    # Poll until export is complete (bounded; large exports can take hours)
+    deadline = time.monotonic() + export_timeout_s
     while True:
         exp = service.matters().exports().get(
             matterId=matter_id, exportId=export_id
@@ -162,6 +180,9 @@ def search_and_export(
             return exp
         elif status == "FAILED":
             return {"error": "Export failed", "details": exp}
+        if time.monotonic() > deadline:
+            return {"status": status or "IN_PROGRESS", "export_id": export_id,
+                    "note": f"Export still running after {export_timeout_s}s; check it in the Vault UI."}
         time.sleep(5)
 
 
@@ -201,12 +222,7 @@ def search_org_unit(
 
     request = {"query": query}
     operation = service.matters().count(matterId=matter_id, body=request).execute()
-
-    while True:
-        op = service.operations().get(name=operation["name"]).execute()
-        if op.get("done"):
-            break
-        time.sleep(2)
+    op = _wait_operation(service, operation)
 
     if "error" in op:
         return {"error": op["error"]}
@@ -265,12 +281,18 @@ def run_investigation(
             result = count_results(service, matter_id, accounts, terms, start_time, end_time)
 
         result["matter_id"] = matter_id
+        if export:
+            result["matter_kept"] = True
+            result["cleanup_note"] = ("Matter kept so the export can be downloaded from Vault "
+                                      "(Vault UI > matter > Exports). Close and delete it afterwards.")
         result["query"] = {"accounts": accounts, "terms": terms, "start_time": start_time, "end_time": end_time}
         return result
 
     finally:
-        # Always cleanup: close then delete
-        if matter:
+        # Cleanup: close then delete. EXCEPT for exports: deleting the matter
+        # deletes its exports, so the files could never be downloaded (bug in
+        # the previous version). Export matters are kept and reported.
+        if matter and not export:
             try:
                 close_matter(service, matter["matterId"])
                 delete_matter(service, matter["matterId"])
@@ -290,6 +312,9 @@ def main():
 
     if not args.accounts and not args.org_unit:
         print(json.dumps({"error": "Must specify --accounts or --org-unit"}))
+        sys.exit(1)
+    if args.org_unit and args.export:
+        print(json.dumps({"error": "--export is only supported with --accounts (org-unit search is count-only)"}))
         sys.exit(1)
 
     try:
