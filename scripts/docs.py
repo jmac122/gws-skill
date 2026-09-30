@@ -66,11 +66,13 @@ def _extract_text(doc: dict) -> str:
     tabs = doc.get("tabs")
     if not tabs:
         return _content_text(doc.get("body", {}).get("content", []))
+    walked = list(_walk_tabs(tabs))
+    label = len(walked) > 1  # label every tab (incl. leaf child tabs) when there is more than one
     parts = []
-    for tab in _walk_tabs(tabs):
+    for tab in walked:
         title = tab.get("tabProperties", {}).get("title", "")
         text = _content_text(tab.get("documentTab", {}).get("body", {}).get("content", []))
-        parts.append(f"=== {title} ===\n{text}" if len(tabs) > 1 or tab.get("childTabs") else text)
+        parts.append(f"=== {title} ===\n{text}" if label else text)
     return "\n".join(parts)
 
 

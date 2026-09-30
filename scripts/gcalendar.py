@@ -4,8 +4,9 @@
 import argparse
 import json
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from auth import get_service
 
@@ -116,41 +117,61 @@ def get_event(
     return _parse_event(e)
 
 
-def today_events(user: str) -> dict:
-    """Get today's events for a user.
+def _calendar_time_zone(user: str, calendar_id: str) -> Optional[str]:
+    """IANA time zone of a calendar, or None if the calendar does not set one.
 
-    Args:
-        user: Email address.
-
-    Returns:
-        Dict with today's events.
+    ``calendar.readonly`` allows calendars.get.
     """
-    return list_events(user, *_local_day_bounds(0))
+    service = get_service("calendar", impersonate=user)
+    tz = service.calendars().get(calendarId=calendar_id).execute().get("timeZone")
+    return tz or None
 
 
-def tomorrow_events(user: str) -> dict:
-    """Get tomorrow's events for a user.
+def today_events(user: str, tz_name: Optional[str] = None, today: Optional[date] = None,
+                 calendar_id: str = "primary") -> dict:
+    """Events for today's date in the calendar's time zone.
 
-    Args:
-        user: Email address.
-
-    Returns:
-        Dict with tomorrow's events.
+    ``tz_name`` is an IANA override; when set, the calendar is not fetched.
+    ``today`` overrides the date (tests). Falls back to the host zone only if
+    the calendar has no timeZone and ``tz_name`` was not given.
     """
-    return list_events(user, *_local_day_bounds(1))
+    if not tz_name:
+        tz_name = _calendar_time_zone(user, calendar_id)
+    return list_events(user, *_day_bounds(0, tz_name, today=today), calendar_id=calendar_id)
 
 
-def _local_day_bounds(offset_days: int) -> tuple:
-    """Midnight-to-midnight bounds of a day in the machine's LOCAL timezone.
+def tomorrow_events(user: str, tz_name: Optional[str] = None, today: Optional[date] = None,
+                    calendar_id: str = "primary") -> dict:
+    """Events for tomorrow's date in the calendar's time zone.
 
-    Previously "today" was computed in UTC, which for America/Chicago shifted
-    the window by 5-6 hours (evening events showed up as "tomorrow").
+    See ``today_events`` for ``tz_name`` / ``today``.
     """
-    day = datetime.now().date() + timedelta(days=offset_days)
-    # astimezone() on a naive datetime applies the local offset for THAT date,
-    # so DST-transition days get the right bounds.
-    start = datetime.combine(day, datetime.min.time()).astimezone()
-    end = datetime.combine(day + timedelta(days=1), datetime.min.time()).astimezone()
+    if not tz_name:
+        tz_name = _calendar_time_zone(user, calendar_id)
+    return list_events(user, *_day_bounds(1, tz_name, today=today), calendar_id=calendar_id)
+
+
+def _day_bounds(offset_days: int, tz_name: Optional[str] = None, today: Optional[date] = None) -> tuple:
+    """Midnight-to-midnight bounds of a day in ``tz_name`` (IANA).
+
+    The day is today's date in that zone (``datetime.now(zone).date() + offset``),
+    or ``today`` when a test freezes the date. Each bound is built with
+    ``datetime.combine(date, time(), tzinfo=zone)`` so a DST transition gets the
+    offset in effect at that midnight. With no ``tz_name``, fall back to the
+    host's local zone (only used when the calendar has no timeZone).
+    """
+    if tz_name:
+        zone = ZoneInfo(tz_name)
+        base = today if today is not None else datetime.now(zone).date()
+        day = base + timedelta(days=offset_days)
+        start = datetime.combine(day, time(), tzinfo=zone)
+        end = datetime.combine(day + timedelta(days=1), time(), tzinfo=zone)
+        return start.isoformat(), end.isoformat()
+
+    base = today if today is not None else datetime.now().astimezone().date()
+    day = base + timedelta(days=offset_days)
+    start = datetime.combine(day, time()).astimezone()
+    end = datetime.combine(day + timedelta(days=1), time()).astimezone()
     return start.isoformat(), end.isoformat()
 
 
@@ -204,12 +225,14 @@ def main():
     p_cals.add_argument("--user", required=True)
 
     # today
-    p_today = sub.add_parser("today", help="Today's events")
+    p_today = sub.add_parser("today", help="Today's events (calendar time zone)")
     p_today.add_argument("--user", required=True)
+    p_today.add_argument("--tz", help="IANA time zone override (default: the calendar's time zone)")
 
     # tomorrow
-    p_tomorrow = sub.add_parser("tomorrow", help="Tomorrow's events")
+    p_tomorrow = sub.add_parser("tomorrow", help="Tomorrow's events (calendar time zone)")
     p_tomorrow.add_argument("--user", required=True)
+    p_tomorrow.add_argument("--tz", help="IANA time zone override (default: the calendar's time zone)")
 
     # event
     p_event = sub.add_parser("event", help="Get specific event")
@@ -225,9 +248,9 @@ def main():
         elif args.command == "calendars":
             result = list_calendars(args.user)
         elif args.command == "today":
-            result = today_events(args.user)
+            result = today_events(args.user, tz_name=args.tz)
         elif args.command == "tomorrow":
-            result = tomorrow_events(args.user)
+            result = tomorrow_events(args.user, tz_name=args.tz)
         elif args.command == "event":
             result = get_event(args.user, args.id, args.calendar)
         else:
