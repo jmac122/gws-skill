@@ -3,14 +3,24 @@
 
 SAFETY MODEL
   * Every command is a DRY RUN by default: it reads the current state and
-    prints a JSON preview (action, target, before, exact request, warnings).
-    Nothing is changed.
-  * ``--apply`` performs the change.
+    prints a JSON preview (action, target, before, exact request, warnings,
+    plan_id). Nothing is changed.
+  * ``--apply`` performs the change, but only with ``--plan-id`` equal to that
+    preview. A missing id is refused before any API call; a mismatched id is
+    refused and no mutating call is made.
   * Destructive actions (user delete, make-admin/revoke-admin, group delete,
     OU delete) additionally need ``--confirm <exact target>`` with --apply.
-  * Every --apply attempt (success, failure, or refusal) is appended to a JSONL
-    audit log (~/.config/gws/audit.log, override with GWS_AUDIT_LOG). Passwords
-    and request bodies are never logged.
+    That check runs before any API call.
+  * The tool refuses to delete, suspend, sign out, reset the password of, or
+    revoke admin from the account it impersonates (GWS_ADMIN_EMAIL). The raw
+    target string is checked first; after the user record is fetched, primary
+    email, aliases, and nonEditableAliases are checked too (an alias or numeric
+    id cannot bypass it).
+  * Every --apply attempt (success, failure, or refusal — including a refusal
+    or error while planning) is appended to a JSONL audit log
+    (~/.config/gws/audit.log, override with GWS_AUDIT_LOG). Passwords and
+    request bodies are never logged. ``--apply`` refuses before mutating if
+    that log is not writable.
   * Generated temporary passwords are printed exactly once, in the --apply
     output. Dry runs never generate or show a password.
 
@@ -18,6 +28,7 @@ Exit codes: 0 ok / dry run, 1 API or unexpected error, 2 refused (safety check).
 """
 
 import argparse
+import hashlib
 import json
 import os
 import secrets
@@ -41,6 +52,12 @@ MEMBER_ROLES = ("MEMBER", "MANAGER", "OWNER")
 
 # Actions that need --confirm <target> in addition to --apply.
 CONFIRM_REQUIRED = {"user.delete", "user.make_admin", "user.revoke_admin", "group.delete", "ou.delete"}
+
+# Never run these against the impersonated admin (matched again after the user fetch).
+SELF_PROTECTED = {"user.delete", "user.suspend", "user.revoke_admin", "user.signout", "user.reset_password"}
+
+# Dropped from ``before`` before the plan fingerprint is hashed.
+_FINGERPRINT_VOLATILE = {"lastLoginTime", "etag", "kind"}
 
 WARNINGS = {
     "user.delete": "DESTRUCTIVE: deletes the user account and (after 20 days) its data. "
@@ -116,17 +133,39 @@ def _norm_ou(path: str) -> str:
     return "/" + path.strip("/") if path.strip("/") else "/"
 
 
+def _audit_path(path: Optional[str] = None) -> str:
+    return path or os.environ.get("GWS_AUDIT_LOG") or DEFAULT_AUDIT_LOG
+
+
+def _ensure_audit_parent(path: str) -> None:
+    """Create the audit log's parent. A bare filename (``audit.log``) has none."""
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, mode=0o700, exist_ok=True)
+
+
 def audit(entry: dict, path: Optional[str] = None) -> None:
     """Append one JSONL line to the audit log. Never raises; never logs secrets."""
-    path = path or os.environ.get("GWS_AUDIT_LOG") or DEFAULT_AUDIT_LOG
+    path = _audit_path(path)
     line = {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"), **entry}
     try:
-        os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+        _ensure_audit_parent(path)
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         with os.fdopen(fd, "a", encoding="utf-8") as f:
             f.write(json.dumps(line, ensure_ascii=False) + "\n")
     except OSError as e:
         print(json.dumps({"warning": f"could not write audit log {path}: {e}"}), file=sys.stderr)
+
+
+def _audit_writable(path: Optional[str] = None) -> None:
+    """Raise Refused if this apply could not be recorded. Call before any mutation."""
+    path = _audit_path(path)
+    try:
+        _ensure_audit_parent(path)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        os.close(fd)
+    except OSError as e:
+        raise Refused(f"audit log not writable: {path}: {e}") from e
 
 
 def _redact(body: Any) -> Any:
@@ -164,11 +203,35 @@ def _plan(action, target, before, resource, method, params, body=None, **extra) 
 
 
 def _guard_self(action: str, target: str) -> None:
-    """Never let the tool lock out the admin account it runs as."""
+    """Cheap check: the raw target string is the admin email this tool impersonates."""
     me = admin_email().lower()
-    if me and target.lower() == me and action in {
-        "user.delete", "user.suspend", "user.revoke_admin", "user.signout", "user.reset_password"}:
+    if me and target.lower() == me and action in SELF_PROTECTED:
         raise Refused(f"Refusing {action} on the GWS_ADMIN_EMAIL account ({target}) this tool impersonates.")
+
+
+def _guard_self_record(action: str, user_record: Optional[dict]) -> None:
+    """Post-fetch check so an alias or numeric user id cannot bypass self-protection.
+
+    Refuses when GWS_ADMIN_EMAIL (case-insensitive) is the record's primaryEmail
+    or is listed in its aliases or nonEditableAliases.
+    """
+    if action not in SELF_PROTECTED or not user_record:
+        return
+    me = admin_email().lower()
+    if not me:
+        return
+    emails = []
+    primary = user_record.get("primaryEmail")
+    if isinstance(primary, str) and primary:
+        emails.append(primary)
+    for key in ("aliases", "nonEditableAliases"):
+        vals = user_record.get(key) or []
+        if isinstance(vals, str):
+            vals = [vals]
+        emails.extend(v for v in vals if isinstance(v, str) and v)
+    if any(e.lower() == me for e in emails):
+        shown = primary if isinstance(primary, str) and primary else admin_email()
+        raise Refused(f"Refusing {action} on the GWS_ADMIN_EMAIL account ({shown}) this tool impersonates.")
 
 
 # ---- users
@@ -261,6 +324,7 @@ def plan_user_update(svc, email, first=None, last=None, title=None, department=N
 def _user_flag_plan(svc, action, email, body, before_fields, noop_if=None):
     _guard_self(action, email)
     before = _require(_get_user(svc, email), f"User {email}")
+    _guard_self_record(action, before)
     extra = {}
     if noop_if and noop_if(before):
         extra["noop"] = "user is already in the requested state"
@@ -298,6 +362,7 @@ def plan_user_move(svc, email, ou):
 def plan_user_signout(svc, email):
     _guard_self("user.signout", email)
     before = _require(_get_user(svc, email), f"User {email}")
+    _guard_self_record("user.signout", before)
     return _plan("user.signout", email, _pick(before, ("primaryEmail", "suspended", "lastLoginTime")),
                  "users", "signOut", {"userKey": email}, None)
 
@@ -306,6 +371,8 @@ def plan_user_admin(svc, email, grant: bool):
     action = "user.make_admin" if grant else "user.revoke_admin"
     _guard_self(action, email)
     before = _require(_get_user(svc, email), f"User {email}")
+    if not grant:
+        _guard_self_record(action, before)
     extra = {}
     if bool(before.get("isAdmin")) == grant:
         extra["noop"] = f"isAdmin is already {grant}"
@@ -333,6 +400,7 @@ def plan_alias_remove(svc, email, alias):
 def plan_user_delete(svc, email):
     _guard_self("user.delete", email)
     before = _require(_get_user(svc, email), f"User {email}")
+    _guard_self_record("user.delete", before)
     return _plan("user.delete", email, _pick(before, USER_FIELDS), "users", "delete", {"userKey": email}, None)
 
 
@@ -455,6 +523,76 @@ def plan_ou_delete(svc, path):
 
 # --------------------------------------------------------------------------- execution
 
+_PLAN_FN_ACTIONS = {
+    plan_user_create: "user.create",
+    plan_user_update: "user.update",
+    plan_user_suspend: "user.suspend",
+    plan_user_unsuspend: "user.unsuspend",
+    plan_user_reset_password: "user.reset_password",
+    plan_user_move: "user.move",
+    plan_user_signout: "user.signout",
+    plan_alias_add: "user.add_alias",
+    plan_alias_remove: "user.remove_alias",
+    plan_user_delete: "user.delete",
+    plan_group_create: "group.create",
+    plan_group_update: "group.update",
+    plan_group_delete: "group.delete",
+    plan_member_add: "group.add_member",
+    plan_member_remove: "group.remove_member",
+    plan_member_role: "group.set_role",
+    plan_ou_create: "ou.create",
+    plan_ou_update: "ou.update",
+    plan_ou_delete: "ou.delete",
+}
+
+
+def _audit_subject(plan_fn, args, action_hint, target_hint):
+    """Action and target for an audit line when planning never returned a plan."""
+    if action_hint:
+        action = action_hint
+    elif plan_fn is plan_user_admin:
+        grant = bool(args[1]) if len(args) > 1 else False
+        action = "user.make_admin" if grant else "user.revoke_admin"
+    else:
+        action = _PLAN_FN_ACTIONS.get(plan_fn, getattr(plan_fn, "__name__", "unknown"))
+    if target_hint is not None:
+        target = target_hint
+    elif args:
+        target = args[0]
+    else:
+        target = None
+    return action, target
+
+
+def _strip_volatile(value: Any) -> Any:
+    """Drop volatile keys so a plan_id survives etag / last-login churn."""
+    if isinstance(value, dict):
+        return {k: _strip_volatile(v) for k, v in value.items() if k not in _FINGERPRINT_VOLATILE}
+    if isinstance(value, list):
+        return [_strip_volatile(v) for v in value]
+    return value
+
+
+def _plan_id(plan: dict) -> str:
+    """First 16 hex chars of sha256 over canonical action/target/before/request."""
+    payload = {
+        "action": plan.get("action"),
+        "target": plan.get("target"),
+        "before": _strip_volatile(plan.get("before")),
+        "request": plan.get("request"),
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
+def _next_step(plan: dict, plan_id: str) -> str:
+    flags = f"--apply --plan-id {plan_id}"
+    if plan.get("requires_confirm"):
+        flags += f" --confirm '{plan['target']}'"
+    return ("Show this preview to the user. Re-run with " + flags
+            + " ONLY after they explicitly approve this exact change.")
+
+
 def check_confirm(action: str, target: str, confirm: Optional[str]) -> None:
     if action in CONFIRM_REQUIRED and confirm != target:
         if confirm is None:
@@ -473,12 +611,16 @@ def _call(svc, resource: str, method: str, params: dict, body: Optional[dict]):
 
 
 def run(plan_fn: Callable, args: tuple, kwargs: dict, *, apply: bool = False,
-        confirm: Optional[str] = None, target_hint: Optional[str] = None,
-        action_hint: Optional[str] = None, service=None, audit_path: Optional[str] = None) -> dict:
+        confirm: Optional[str] = None, plan_id: Optional[str] = None,
+        target_hint: Optional[str] = None, action_hint: Optional[str] = None,
+        service=None, audit_path: Optional[str] = None) -> dict:
     """Plan an action, then either return the dry-run preview or apply it.
 
+    When applying, the order is: --confirm pre-check, required --plan-id,
+    audit log writable, build the plan, refuse if the fingerprint differs,
+    then the single call.
     ``action_hint``/``target_hint`` let --confirm be validated BEFORE any API
-    call (so a mismatch never even reads state).
+    call (so a mismatch never even reads state). Dry runs are not audited.
     """
     if apply and action_hint:
         try:
@@ -487,14 +629,45 @@ def run(plan_fn: Callable, args: tuple, kwargs: dict, *, apply: bool = False,
             audit({"action": action_hint, "target": target_hint, "result": "refused", "reason": str(e)}, audit_path)
             raise
 
-    svc = service or get_service("directory_write")
-    plan = plan_fn(svc, *args, **kwargs)
+    if apply and not plan_id:
+        action, target = _audit_subject(plan_fn, args, action_hint, target_hint)
+        reason = ("--apply requires --plan-id from the dry run; "
+                  "re-run the dry run and pass its plan_id")
+        audit({"action": action, "target": target, "result": "refused", "reason": reason}, audit_path)
+        raise Refused(reason)
 
+    if apply:
+        # No mutation without a writable audit trail; checked before any API call.
+        try:
+            _audit_writable(audit_path)
+        except Refused as e:
+            print(json.dumps({"warning": str(e)}), file=sys.stderr)
+            raise
+
+    svc = service or get_service("directory_write")
+    try:
+        plan = plan_fn(svc, *args, **kwargs)
+    except Refused as e:
+        if apply:
+            action, target = _audit_subject(plan_fn, args, action_hint, target_hint)
+            audit({"action": action, "target": target, "result": "refused", "reason": str(e)}, audit_path)
+        raise
+    except Exception as e:
+        if apply:
+            action, target = _audit_subject(plan_fn, args, action_hint, target_hint)
+            audit({"action": action, "target": target, "result": "error", "error": str(e)[:500]}, audit_path)
+        raise
+
+    fingerprint = _plan_id(plan)
     if not apply:
-        return {"mode": "dry_run", **plan,
-                "next_step": "Show this preview to the user. Re-run with --apply"
-                             + (f" --confirm '{plan['target']}'" if plan["requires_confirm"] else "")
-                             + " ONLY after they explicitly approve this exact change."}
+        return {"mode": "dry_run", **plan, "plan_id": fingerprint,
+                "next_step": _next_step(plan, fingerprint)}
+
+    if fingerprint != plan_id:
+        reason = (f"plan changed since dry run (expected {plan_id}, got {fingerprint}); "
+                  "re-run the dry run and get approval again")
+        audit({"action": plan["action"], "target": plan["target"], "result": "refused", "reason": reason}, audit_path)
+        raise Refused(reason)
 
     try:
         check_confirm(plan["action"], plan["target"], confirm)
@@ -537,6 +710,8 @@ def run(plan_fn: Callable, args: tuple, kwargs: dict, *, apply: bool = False,
 
 def _common(p):
     p.add_argument("--apply", action="store_true", help="Actually perform the change (default: dry run)")
+    p.add_argument("--plan-id", metavar="ID",
+                   help="plan_id from the approved dry-run preview (required with --apply)")
     p.add_argument("--confirm", metavar="TARGET",
                    help="Exact target (email / OU path) — required with --apply for destructive actions")
     return p
@@ -544,7 +719,8 @@ def _common(p):
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="GWS Directory admin WRITE actions. Dry run by default; --apply to change; "
+        description="GWS Directory admin WRITE actions. Dry run by default; "
+                    "--apply --plan-id <id> to change; "
                     "destructive actions also need --confirm <exact target>.")
     res = parser.add_subparsers(dest="resource", required=True)
 
@@ -657,7 +833,7 @@ def main(argv: Optional[list] = None, service=None) -> int:
     args = build_parser().parse_args(argv)
     try:
         fn, a, k, hint, target = dispatch(args)
-        result = run(fn, a, k, apply=args.apply, confirm=args.confirm,
+        result = run(fn, a, k, apply=args.apply, confirm=args.confirm, plan_id=args.plan_id,
                      action_hint=hint, target_hint=target, service=service)
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return 0

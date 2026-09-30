@@ -33,6 +33,23 @@ def svc_with(responses):
     return build("admin", "directory_v1", http=http, static_discovery=True), http
 
 
+def _dry_argv(argv):
+    """Same command without --apply / --confirm / --plan-id (those consume no extra reads)."""
+    out = []
+    skip_next = False
+    for a in argv:
+        if skip_next:
+            skip_next = False
+            continue
+        if a == "--apply":
+            continue
+        if a in ("--confirm", "--plan-id"):
+            skip_next = True
+            continue
+        out.append(a)
+    return out
+
+
 @pytest.mark.parametrize("argv,responses,expected", [
     (["user", "signout", "jane@example.com", "--apply"], [USER, ""],
      ("POST", f"{BASE}/users/jane%40example.com/signOut", None)),
@@ -47,8 +64,15 @@ def svc_with(responses):
      ("PATCH", f"{BASE}/groups/team%40example.com/members/jane%40example.com", {"role": "OWNER"})),
 ])
 def test_real_discovery_requests(argv, responses, expected, capsys):
+    # Dry run consumes the before-state read, so it runs on its own service.
+    dry_svc, _dry_http = svc_with(responses[:1])
+    rc = admin.main(_dry_argv(argv), service=dry_svc)
+    preview = json.loads(capsys.readouterr().out)
+    assert rc == 0, preview
+    plan_id = preview["plan_id"]
+
     svc, http = svc_with(responses)
-    rc = admin.main(argv, service=svc)
+    rc = admin.main(argv + ["--plan-id", plan_id], service=svc)
     out = json.loads(capsys.readouterr().out)
     assert rc == 0, out
     assert http.log[0][0] == "GET"  # before-state read
